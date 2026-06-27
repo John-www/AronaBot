@@ -1,9 +1,8 @@
-# AronaBot Workspace
+# AronaBot
 
-This repository is split into two runnable bot folders:
+Git-tracked deployment bot:
 
 - `Arona/` - stable ARONA bot for deployment and feature extensions.
-- `Plana/` - local development bot for RAG, experiments, and new features.
 
-Run each bot from inside its own folder so relative paths such as `newbotpic/`,
-`rag_docs/`, `rag_index/`, and `dungeon_game.db` resolve correctly.
+Run ARONA from inside its folder so relative paths such as `newbotpic/` and
+`dungeon_game.db` resolve correctly.
