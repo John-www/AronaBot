@@ -27,6 +27,8 @@ ALLOWED_CHANNEL_ID = os.getenv("DISCORD_CHANNEL_ID", "714882888503656504")
 OLLAMA_HEALTH_URL = "http://localhost:11434/api/tags"
 LEGACY_SETTING_PATH = Path(os.getenv("LEGACY_BOT_SETTING", r"D:\PUclass\VStest\2B_ISNOTBOT-main\setting.json"))
 NO_COLOR_IMAGE_PATH = Path(os.getenv("NO_COLOR_IMAGE_PATH", PROJECT_DIR / "newbotpic" / "NOH.png"))
+LOTTERY_IMAGE_DIR = Path(os.getenv("LOTTERY_IMAGE_DIR", PROJECT_DIR / "newbotpic" / "LUCKY"))
+IMAGE_SUFFIXES = {".gif", ".jfif", ".jpeg", ".jpg", ".png", ".webp"}
 CWA_WEEK_URL = "https://www.cwa.gov.tw/V8/C/W/County/MOD/wf7dayNC_NCSEI/ALL_Week.html"
 CWA_WEEK_TIME_URL = "https://www.cwa.gov.tw/Data/js/fcst/week_TIME.js"
 
@@ -443,6 +445,19 @@ def random_existing_file(paths):
     return random.choice(candidates)
 
 
+def random_image_from_dir(image_dir):
+    if not image_dir.exists():
+        return None
+    candidates = [
+        path
+        for path in image_dir.rglob("*")
+        if path.is_file() and path.suffix.lower() in IMAGE_SUFFIXES
+    ]
+    if not candidates:
+        return None
+    return random.choice(candidates)
+
+
 def choose_option(default_options, options=None):
     candidates = options.split() if options else default_options
     candidates = [option.strip() for option in candidates if option.strip()]
@@ -717,7 +732,13 @@ async def send_random_file(ctx, key, missing_message):
 
 @bot.command(name="抽籤", aliases=["抽獎"])
 async def draw_lottery(ctx):
-    await send_random_file(ctx, "pic2", "找不到可用的抽籤圖片，請確認舊 bot 的圖片路徑還存在。")
+    if await reject_wrong_channel(ctx):
+        return
+    image_path = random_image_from_dir(LOTTERY_IMAGE_DIR) or random_existing_file(LEGACY_SETTINGS.get("pic2", []))
+    if not image_path:
+        await ctx.reply("找不到可用的抽籤圖片，請確認 `newbotpic/LUCKY` 裡有圖片。")
+        return
+    await ctx.reply(file=discord.File(str(image_path)))
 
 
 @bot.command(name="隨機圖片")
