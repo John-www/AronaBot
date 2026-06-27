@@ -19,13 +19,14 @@ import dungeon_game as dungeon
 from dungeon_db import delete_player, diagnostics as dungeon_db_diagnostics, load_player, save_player
 
 
+PROJECT_DIR = Path(__file__).resolve().parent
 TOKEN_ENV = "DISCORD_TOKEN"
 DEFAULT_MODEL = os.getenv("RAG_OLLAMA_MODEL", "qwen2.5:3b")
 DUNGEON_GM_MODEL = os.getenv("DUNGEON_GM_MODEL", DEFAULT_MODEL)
 ALLOWED_CHANNEL_ID = os.getenv("DISCORD_CHANNEL_ID")
 OLLAMA_HEALTH_URL = "http://localhost:11434/api/tags"
 LEGACY_SETTING_PATH = Path(os.getenv("LEGACY_BOT_SETTING", r"D:\PUclass\VStest\2B_ISNOTBOT-main\setting.json"))
-NO_COLOR_IMAGE_PATH = Path(r"F:\VS\newbotpic\NOH.png")
+NO_COLOR_IMAGE_PATH = Path(os.getenv("NO_COLOR_IMAGE_PATH", PROJECT_DIR / "newbotpic" / "NOH.png"))
 CWA_WEEK_URL = "https://www.cwa.gov.tw/V8/C/W/County/MOD/wf7dayNC_NCSEI/ALL_Week.html"
 CWA_WEEK_TIME_URL = "https://www.cwa.gov.tw/Data/js/fcst/week_TIME.js"
 
