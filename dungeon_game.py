@@ -8,6 +8,7 @@ MID_BOSS_FLOORS = {3, 7, 13, 17, 23}
 BOSS_FLOORS = {5, 10, 15, 20}
 MERCHANT_FLOORS = {3, 5, 7, 10, 13, 15, 17, 20, 23}
 MAX_FLOOR = 25
+DEFAULT_BASE_MAX_HP = 60
 TAIWAN_TZ = timezone(timedelta(hours=8))
 
 ITEMS = {
@@ -217,7 +218,7 @@ MID_BOSSES = [
         "hp": 40,
         "attack": [4, 7],
         "gold": [40, 60],
-        "status": {"name": "麻痺", "chance": 0.25},
+        "status": {"name": "麻痺", "chance": 0.15},
     },
 ]
 
@@ -262,9 +263,9 @@ def new_player(user_id, name):
         "mode": "explore",
         "floor": 1,
         "step": 0,
-        "hp": 100,
-        "base_max_hp": 100,
-        "max_hp": 100,
+        "hp": DEFAULT_BASE_MAX_HP,
+        "base_max_hp": DEFAULT_BASE_MAX_HP,
+        "max_hp": DEFAULT_BASE_MAX_HP,
         "gold": 0,
         "weapon": deepcopy(WEAPONS["木劍"]),
         "armor": deepcopy(ARMORS["布衣"]),
@@ -294,9 +295,22 @@ def new_player(user_id, name):
     return state
 
 
+def normalize_state(state):
+    """Apply small save migrations for older test saves."""
+    if state.get("base_max_hp", 100) == 100:
+        state["base_max_hp"] = DEFAULT_BASE_MAX_HP
+    recalc_max_hp(state)
+    weapon = state.get("weapon")
+    if weapon and weapon.get("name") == "木劍":
+        weapon["min"] = WEAPONS["木劍"]["min"]
+        weapon["max"] = WEAPONS["木劍"]["max"]
+        weapon.setdefault("price", WEAPONS["木劍"]["price"])
+    return state
+
+
 def status_text(state):
     recalc_max_hp(state)
-    accessory = state["accessory"]["name"] if state.get("accessory") else "無"
+    accessory = format_equipment(state["accessory"]) if state.get("accessory") else "無"
     statuses = "、".join(state.get("statuses", {}).keys()) or "無"
     mode = {"explore": "探索", "encounter": "遭遇", "chest": "寶箱", "battle": "戰鬥", "shop": "商店", "dead": "死亡", "cleared": "通關"}.get(
         state["mode"], state["mode"]
@@ -317,10 +331,12 @@ def status_text(state):
 def compact_status_line(state):
     recalc_max_hp(state)
     statuses = "、".join(format_status(name, value) for name, value in state.get("statuses", {}).items()) or "無異常"
-    weapon = state["weapon"]["name"]
-    armor = state["armor"]["name"]
-    accessory = state["accessory"]["name"] if state.get("accessory") else "無飾品"
-    return f"HP:{state['hp']}/{state['max_hp']} {statuses} G{state['gold']} {weapon} {armor} {accessory}"
+    accessory = format_equipment(state["accessory"]) if state.get("accessory") else "無飾品"
+    return (
+        f"HP:{state['hp']}/{state['max_hp']} {statuses} {state['gold']}G\n"
+        f"{format_equipment(state['weapon'])} {format_equipment(state['armor'])}\n"
+        f"{accessory}"
+    )
 
 
 def format_status(name, value):
@@ -366,7 +382,7 @@ def choose_event(state, number):
 
     chosen_label = event["type"] if state.get("map_revealed") or was_torch_revealed or event["type"] == "商人" or number <= reveal_count else EVENT_HINTS.get(event["type"], "???")
     actor = state.get("last_actor") or "有人"
-    header = f"{actor} 選了 {number}. {chosen_label}\n"
+    header = f"{actor} 提議選了 {number}. {chosen_label}\n"
     text = handle_event(state, event)
     if state["mode"] == "explore":
         text = text + "\n\n" + maybe_start_floor_end(state)
@@ -516,8 +532,8 @@ def use_item(state, number):
             return "煙霧彈只能在遭遇或戰鬥中使用。"
         monster = state["battle"]["monster"] if state["mode"] == "battle" else state["encounter"]["monster"]
         monster_type = monster["type"]
-        if monster_type not in {"普通怪", "精英怪"}:
-            return "煙霧彈只能對普通怪與精英怪使用。"
+        if monster_type not in {"普通怪", "精英怪", "寶箱怪"}:
+            return "煙霧彈只能對普通怪、精英怪與寶箱怪使用。"
         remove_item(state, name, 1)
         add_item_use_stat(state, name)
         state["battle"] = None
@@ -723,6 +739,10 @@ def handle_event(state, event):
             return f"你找到 {item}，但背包已滿，只能放棄。"
         return f"你在石縫旁找到 {item} ×1。"
     if event_type == "寶箱":
+        if item_count(state, "寶箱鑰匙") <= 0:
+            state["pending_chest"] = False
+            state["mode"] = "explore"
+            return "你發現寶箱，但沒有寶箱鑰匙，只能放棄。"
         state["mode"] = "chest"
         state["pending_chest"] = True
         return chest_prompt(state)
@@ -750,11 +770,13 @@ def encounter_prompt(state):
         state["mode"] = "explore"
         return current_prompt(state)
     monster = encounter["monster"]
-    smoke = "\n3. 使用煙霧彈：`/使用 編號:煙霧彈的背包編號`" if item_count(state, "煙霧彈") > 0 and monster["type"] in {"普通怪", "精英怪"} else ""
+    smoke = "\n3. 使用煙霧彈：`/使用 編號:煙霧彈的背包編號`" if item_count(state, "煙霧彈") > 0 and monster["type"] in {"普通怪", "精英怪", "寶箱怪"} else ""
     escape = "2. 逃跑：`/逃跑`" if monster["type"] not in {"大Boss", "魔王", "寶箱怪"} else "2. 逃跑：不可逃跑"
     return (
         f"{compact_status_line(state)}\n\n"
         f"遭遇 {monster['name']}（{monster['type']}）！\n"
+        f"{format_monster_info(monster)}\n"
+        f"{format_incoming_damage_info(monster, state)}\n"
         "1. 戰鬥：`/攻擊`\n"
         f"{escape}"
         f"{smoke}"
@@ -912,6 +934,9 @@ def battle_prompt(state):
     return (
         f"{compact_status_line(state)}\n\n"
         f"**戰鬥中：{monster['name']}**\n"
+        f"{format_monster_info(monster)}\n"
+        f"{format_incoming_damage_info(monster, state)}\n"
+        f"{format_enemy_status(battle)}"
         f"敵方 HP：{battle['enemy_hp']} / {battle['enemy_max_hp']}\n"
         f"你的 HP：{state['hp']} / {state['max_hp']}\n"
         "1. 攻擊：`/攻擊`\n"
@@ -988,7 +1013,8 @@ def resolve_drops(state, monster):
 def monster_action(state, messages):
     battle = state["battle"]
     monster = battle["monster"]
-    if battle.pop("skip_next", False):
+    if battle.get("enemy_paralyzed_turns", 0) > 0 or battle.pop("skip_next", False):
+        battle["enemy_paralyzed_turns"] = max(0, battle.get("enemy_paralyzed_turns", 1) - 1)
         messages.append(f"{monster['name']} 因麻痺而無法行動。")
         return
     attacks = 1
@@ -1017,7 +1043,7 @@ def monster_action(state, messages):
 
     status = monster.get("status")
     if monster.get("name") == "哥布林部落酋長" and battle["enemy_hp"] < 20:
-        status = {"name": "麻痺", "chance": 0.45}
+        status = {"name": "麻痺", "chance": 0.25}
     if status and random.random() < status["chance"]:
         apply_status(state, status["name"], messages)
     for status in monster.get("status_pool", []):
@@ -1116,7 +1142,8 @@ def generate_floor_events(floor):
         replace_one_empty(extra, "金色稀有怪")
     elif random.randint(1, 10) == 1:
         replace_one_empty(extra, "銀色稀有怪")
-    if floor in MERCHANT_FLOORS:
+    merchant_count = merchant_count_for_floor(floor)
+    for _ in range(merchant_count):
         replace_one_empty(extra, "商人")
 
     random.shuffle(extra)
@@ -1135,6 +1162,14 @@ def replace_one_empty(events, event_type):
             return
     if events:
         events[-1]["type"] = event_type
+
+
+def merchant_count_for_floor(floor):
+    if 1 <= floor <= 5:
+        return 2
+    if floor in MERCHANT_FLOORS:
+        return 2
+    return 1 if random.random() < 0.35 else 0
 
 
 def generate_shop(floor):
@@ -1353,7 +1388,7 @@ def apply_weapon_affix(state, battle, messages):
             battle["enemy_hp"] = max(0, battle["enemy_hp"] - 2)
             messages.append("敵人額外受到 2 點流血傷害。")
         elif affix == "麻痺":
-            battle["skip_next"] = True
+            battle["enemy_paralyzed_turns"] = 1
 
 
 def apply_status(state, status, messages):
@@ -1510,6 +1545,38 @@ def format_equipment(item):
     return f"{item['name']}（{'、'.join(effects) or '特殊效果'}）"
 
 
+def format_monster_info(monster):
+    parts = []
+    if monster.get("attack"):
+        parts.append(f"攻擊:{monster['attack'][0]}~{monster['attack'][1]}")
+    status = monster.get("status")
+    if status:
+        parts.append(f"{status['name']}({int(status['chance'] * 100)}%)")
+    for status in monster.get("status_pool", []):
+        parts.append(f"{status['name']}({int(status['chance'] * 100)}%)")
+    if monster.get("double_chance"):
+        parts.append(f"二連擊({int(monster['double_chance'] * 100)}%)")
+    if monster.get("preemptive"):
+        parts.append("先制攻擊")
+    return " ".join(parts) if parts else "攻擊:?"
+
+
+def format_incoming_damage_info(monster, state):
+    if not monster.get("attack"):
+        return ""
+    defense = player_defense(state)
+    low = max(1, monster["attack"][0] - defense)
+    high = max(1, monster["attack"][1] - defense)
+    return f"我方防禦:{defense} 預估承傷:{low}~{high}"
+
+
+def format_enemy_status(battle):
+    turns = battle.get("enemy_paralyzed_turns", 0)
+    if turns > 0:
+        return f"敵方狀態：麻痺{turns}回合\n"
+    return ""
+
+
 def format_item_description(name):
     descriptions = {
         "回復藥": "恢復20HP",
@@ -1520,7 +1587,7 @@ def format_item_description(name):
         "火把": "公開下一步全部事件",
         "地圖": "公開本層全部事件",
         "寶箱鑰匙": "開啟寶箱或中Boss逃跑",
-        "煙霧彈": "普通怪/精英怪必定逃跑",
+        "煙霧彈": "普通怪/精英怪/寶箱怪必定逃跑",
         "鳳凰羽毛": "死亡時自動復活30HP",
     }
     return descriptions.get(name, "特殊道具")

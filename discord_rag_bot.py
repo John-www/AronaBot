@@ -14,12 +14,14 @@ from discord import app_commands
 from discord.ext import commands
 
 from thesis_rag import CHUNKS_FILE, EMBEDDINGS_FILE, ask
+import dungeon_ai
 import dungeon_game as dungeon
 from dungeon_db import delete_player, diagnostics as dungeon_db_diagnostics, load_player, save_player
 
 
 TOKEN_ENV = "DISCORD_TOKEN"
 DEFAULT_MODEL = os.getenv("RAG_OLLAMA_MODEL", "qwen2.5:3b")
+DUNGEON_GM_MODEL = os.getenv("DUNGEON_GM_MODEL", DEFAULT_MODEL)
 ALLOWED_CHANNEL_ID = os.getenv("DISCORD_CHANNEL_ID")
 OLLAMA_HEALTH_URL = "http://localhost:11434/api/tags"
 LEGACY_SETTING_PATH = Path(os.getenv("LEGACY_BOT_SETTING", r"D:\PUclass\VStest\2B_ISNOTBOT-main\setting.json"))
@@ -642,6 +644,8 @@ async def dungeon_intro(ctx):
         "`/裝備 編號:1` - 裝備背包中的備用裝備。\n"
         "`/開啟`、`/放棄` - 寶箱相關操作。\n"
         "`/商店`、`/購買 編號:1 2 4`、`/販售 編號:1`、`/離開商店` - 商人相關操作。"
+        "\n`/旁白 開啟:True` / `/旁白 開啟:False` - 開關 AI GM 旁白。"
+        "\n`/問 問題:我現在該逃跑嗎` - 詢問 AI GM 地城建議。"
     )
     await ctx.reply(message)
 
@@ -693,6 +697,7 @@ async def status(ctx):
         f"向量索引：{embedding_status}\n"
         f"Ollama：{ollama_status}\n"
         f"模型：`{DEFAULT_MODEL}`\n"
+        f"地城GM模型：`{DUNGEON_GM_MODEL}`\n"
         f"回答頻道：{channel_status}\n"
         "指令：`!ask 你的問題`"
     )
@@ -802,9 +807,15 @@ async def ask_rag(ctx, *, question):
 async def send_interaction_text(interaction, text, view=None):
     parts = split_message(text)
     if not interaction.response.is_done():
-        await interaction.response.send_message(parts[0], view=view)
+        if view is None:
+            await interaction.response.send_message(parts[0])
+        else:
+            await interaction.response.send_message(parts[0], view=view)
     else:
-        await interaction.followup.send(parts[0], view=view)
+        if view is None:
+            await interaction.followup.send(parts[0])
+        else:
+            await interaction.followup.send(parts[0], view=view)
     for part in parts[1:]:
         await interaction.followup.send(part)
 
@@ -814,7 +825,15 @@ async def defer_interaction(interaction):
         await interaction.response.defer(thinking=True)
 
 
-async def send_dungeon_result(interaction, state, text):
+async def send_dungeon_result(interaction, state, text, narrate=False, narration_kind="事件"):
+    if narrate and dungeon_gm_enabled(state):
+        narration = await asyncio.to_thread(
+            dungeon_ai.narrate_event,
+            build_narration_context(state, text, narration_kind),
+            DUNGEON_GM_MODEL,
+        )
+        if narration:
+            text = f"**アロナ:**\n{narration}\n\n**系統結果**\n{text}"
     save_player(state)
     await send_interaction_text(interaction, text, view=create_dungeon_view(state))
 
@@ -823,6 +842,7 @@ def load_dungeon_or_message(interaction):
     state = load_player(dungeon_session_id(interaction))
     if not state:
         return None, "你還沒有建立冒險者。請先使用 `/開始`。"
+    dungeon.normalize_state(state)
     return state, None
 
 
@@ -842,6 +862,100 @@ def set_dungeon_actor(state, interaction):
     state["last_actor"] = interaction.user.display_name
 
 
+def dungeon_gm_enabled(state):
+    return state.get("gm_narration_enabled", True)
+
+
+def build_narration_context(state, result_text, kind):
+    battle = state.get("battle") or {}
+    encounter = state.get("encounter") or {}
+    monster = battle.get("monster") or encounter.get("monster")
+    monster_text = ""
+    if monster:
+        current_hp = battle.get("enemy_hp", monster.get("hp"))
+        max_hp = battle.get("enemy_max_hp", monster.get("hp"))
+        monster_text = f"敵人：{monster.get('name')}（{monster.get('type')}），HP {current_hp}/{max_hp}"
+    return (
+        f"事件類型：{kind}\n"
+        f"提議者：{state.get('last_actor') or '未知'}\n"
+        "這是多人共用冒險，請把玩家稱作冒險團，不要把提議者寫成唯一主角。\n"
+        f"樓層：第 {state.get('floor')} 層，第 {min(state.get('step', 0) + 1, 5)} 步\n"
+        f"玩家狀態：{dungeon.compact_status_line(state)}\n"
+        f"{monster_text}\n"
+        "已確定的系統結果如下，必須遵守，不可改寫數值或選項：\n"
+        f"{result_text[:1200]}"
+    )
+
+
+def build_gm_chat_context(state):
+    battle = state.get("battle") or {}
+    encounter = state.get("encounter") or {}
+    monster = battle.get("monster") or encounter.get("monster")
+    monster_text = "無"
+    if monster:
+        current_hp = battle.get("enemy_hp", monster.get("hp"))
+        max_hp = battle.get("enemy_max_hp", monster.get("hp"))
+        monster_text = f"{monster.get('name')}（{monster.get('type')}）HP {current_hp}/{max_hp}"
+    inventory = ", ".join(f"{name}x{qty}" for name, qty in dungeon.inventory_lines(state)) or "無"
+    equipment_bag = ", ".join(dungeon.format_equipment(item) for item in state.get("equipment_bag", [])) or "無"
+    return (
+        f"模式：{state.get('mode')}\n"
+        f"樓層：第 {state.get('floor')} 層，第 {min(state.get('step', 0) + 1, 5)} 步\n"
+        f"玩家狀態：{dungeon.compact_status_line(state)}\n"
+        f"目前敵人：{monster_text}\n"
+        f"背包道具：{inventory}\n"
+        f"備用裝備：{equipment_bag}\n"
+        "請只根據以上狀態給地城內建議，不可替玩家操作。"
+    )
+
+
+def use_items_from_selection(state, values_text):
+    numbers = parse_inventory_selection_values(values_text)
+    if not numbers:
+        return "請選擇要使用的道具。"
+    messages = []
+    for number in numbers:
+        messages.append(dungeon.use_item(state, number))
+        if state.get("mode") in {"dead", "cleared"}:
+            break
+    return "\n\n".join(messages)
+
+
+def parse_inventory_selection_values(values_text):
+    numbers = []
+    for token in str(values_text).split():
+        base = token.split(":", 1)[0]
+        if base.isdigit():
+            numbers.append(int(base))
+    return numbers
+
+
+def equip_items_from_selection(state, values_text):
+    equipment_indices = []
+    for token in str(values_text).split():
+        if token.startswith("eq:") and token[3:].isdigit():
+            equipment_indices.append(int(token[3:]))
+        elif token.isdigit():
+            inventory_count = len(dungeon.inventory_lines(state))
+            equipment_indices.append(int(token) - inventory_count - 1)
+    if not equipment_indices:
+        return "請選擇要換上的裝備。"
+    messages = []
+    inventory_count = len(dungeon.inventory_lines(state))
+    selected = []
+    for equipment_index in equipment_indices:
+        if 0 <= equipment_index < len(state.get("equipment_bag", [])):
+            selected.append(state["equipment_bag"][equipment_index])
+    if not selected:
+        return "找不到選擇的裝備。"
+    for item in selected:
+        for current_index, current_item in enumerate(state.get("equipment_bag", [])):
+            if current_item is item:
+                messages.append(dungeon.equip_item(state, inventory_count + current_index + 1))
+                break
+    return "\n\n".join(messages)
+
+
 async def run_dungeon_button_action(interaction, action, value=None):
     if await reject_wrong_interaction(interaction):
         return
@@ -852,14 +966,26 @@ async def run_dungeon_button_action(interaction, action, value=None):
         return
     set_dungeon_actor(state, interaction)
 
+    narrate = False
+    narration_kind = "事件"
     if action == "choose":
         text = dungeon.choose_event(state, int(value))
+        narrate = True
+        narration_kind = "探索選擇"
     elif action == "attack":
         text = dungeon.attack(state)
+        narrate = True
+        narration_kind = "戰鬥行動"
     elif action == "run":
         text = dungeon.run_away(state)
+        narrate = True
+        narration_kind = "逃跑行動"
     elif action == "use":
-        text = dungeon.use_item(state, int(value))
+        mode_before = state.get("mode")
+        text = use_items_from_selection(state, str(value))
+        if mode_before in {"battle", "encounter"}:
+            narrate = True
+            narration_kind = "戰鬥道具"
     elif action == "open":
         text = dungeon.open_chest(state)
     elif action == "abandon":
@@ -869,7 +995,7 @@ async def run_dungeon_button_action(interaction, action, value=None):
     elif action == "sell":
         text = dungeon.sell_items(state, str(value))
     elif action == "equip":
-        text = dungeon.equip_item(state, int(value))
+        text = equip_items_from_selection(state, str(value))
     elif action == "bag":
         state["_ui_mode"] = "bag"
         text = dungeon.bag_text(state)
@@ -882,7 +1008,7 @@ async def run_dungeon_button_action(interaction, action, value=None):
         text = "未知的地城操作。"
     if action not in {"bag"}:
         state.pop("_ui_mode", None)
-    await send_dungeon_result(interaction, state, text)
+    await send_dungeon_result(interaction, state, text, narrate=narrate, narration_kind=narration_kind)
 
 
 class DungeonButton(discord.ui.Button):
@@ -896,17 +1022,23 @@ class DungeonButton(discord.ui.Button):
 
 
 class DungeonSelect(discord.ui.Select):
-    def __init__(self, placeholder, options, action):
-        super().__init__(placeholder=placeholder, min_values=1, max_values=1, options=options)
+    def __init__(self, placeholder, options, action, row=None, max_values=1):
+        super().__init__(
+            placeholder=placeholder,
+            min_values=1,
+            max_values=max(1, min(max_values, len(options))),
+            options=options,
+            row=row,
+        )
         self.action = action
 
     async def callback(self, interaction: discord.Interaction):
-        await run_dungeon_button_action(interaction, self.action, self.values[0])
+        await run_dungeon_button_action(interaction, self.action, " ".join(self.values))
 
 
 class DungeonView(discord.ui.View):
     def __init__(self, state):
-        super().__init__(timeout=300)
+        super().__init__(timeout=None)
         self.state = state
         self.build()
 
@@ -918,6 +1050,7 @@ class DungeonView(discord.ui.View):
         mode = self.state.get("mode")
         if mode == "explore":
             self.add_explore_buttons()
+            self.add_item_select_if_available(row=2)
         elif mode == "encounter":
             self.add_combat_buttons(include_smoke=True)
         elif mode == "battle":
@@ -925,6 +1058,7 @@ class DungeonView(discord.ui.View):
         elif mode == "chest":
             self.add_item(DungeonButton("開啟寶箱", "open", style=discord.ButtonStyle.primary))
             self.add_item(DungeonButton("放棄", "abandon", style=discord.ButtonStyle.secondary))
+            self.add_item_select_if_available(row=1)
         elif mode == "shop":
             self.add_shop_controls()
 
@@ -947,12 +1081,13 @@ class DungeonView(discord.ui.View):
         self.add_item(bag_button)
 
     def add_combat_buttons(self, include_smoke):
-        self.add_item(DungeonButton("攻擊", "attack", style=discord.ButtonStyle.danger))
+        attack_label = "戰鬥" if include_smoke else "攻擊"
+        self.add_item(DungeonButton(attack_label, "attack", style=discord.ButtonStyle.danger))
         self.add_item(DungeonButton("逃跑", "run", style=discord.ButtonStyle.secondary))
         self.add_item(DungeonButton("背包", "bag", style=discord.ButtonStyle.success))
         item_options = inventory_select_options(self.state)
         if item_options:
-            self.add_item(DungeonSelect("使用道具", item_options, "use"))
+            self.add_item(DungeonSelect("勾選要使用的道具", item_options, "use", row=2, max_values=len(item_options)))
         if include_smoke:
             smoke_index = inventory_item_index(self.state, "煙霧彈")
             if smoke_index:
@@ -966,21 +1101,31 @@ class DungeonView(discord.ui.View):
             label = shop_option_label(index, good)
             buy_options.append(discord.SelectOption(label=label[:100], value=str(index)))
         if buy_options:
-            self.add_item(DungeonSelect("購買商品", buy_options[:25], "buy"))
+            buy_options = buy_options[:25]
+            self.add_item(DungeonSelect("勾選要購買的商品", buy_options, "buy", row=0, max_values=len(buy_options)))
 
         sell_options = sell_select_options(self.state)
         if sell_options:
-            self.add_item(DungeonSelect("販售背包物品", sell_options[:25], "sell"))
-        self.add_item(DungeonButton("離開商店", "leave_shop", style=discord.ButtonStyle.secondary))
+            sell_options = sell_options[:25]
+            self.add_item(DungeonSelect("勾選要販售的物品", sell_options, "sell", row=1, max_values=len(sell_options)))
+        self.add_item_select_if_available(row=2)
+        leave = DungeonButton("離開商店", "leave_shop", style=discord.ButtonStyle.secondary)
+        leave.row = 3
+        self.add_item(leave)
 
     def add_bag_controls(self):
         item_options = inventory_select_options(self.state)
         if item_options:
-            self.add_item(DungeonSelect("使用道具", item_options, "use"))
+            self.add_item(DungeonSelect("勾選要使用的道具", item_options, "use", row=0, max_values=len(item_options)))
 
         equip_options = equipment_select_options(self.state)
         if equip_options:
-            self.add_item(DungeonSelect("換上裝備", equip_options, "equip"))
+            self.add_item(DungeonSelect("勾選要換上的裝備", equip_options, "equip", row=1, max_values=len(equip_options)))
+
+    def add_item_select_if_available(self, row=None):
+        item_options = inventory_select_options(self.state)
+        if item_options:
+            self.add_item(DungeonSelect("勾選要使用的道具", item_options, "use", row=row, max_values=len(item_options)))
 
 
 def create_dungeon_view(state):
@@ -997,15 +1142,21 @@ def inventory_item_index(state, name):
 
 def inventory_select_options(state):
     options = []
+    expanded_index = 1
+    usable_items = {"回復藥", "高級回復藥", "解毒藥", "止血繃帶", "萬靈藥", "煙霧彈", "火把", "地圖"}
     for index, (name, qty) in enumerate(dungeon.inventory_lines(state), 1):
-        if name in {"回復藥", "高級回復藥", "解毒藥", "止血繃帶", "萬靈藥", "煙霧彈", "火把", "地圖"}:
+        if name not in usable_items:
+            continue
+        for copy_index in range(1, qty + 1):
+            suffix = f" #{copy_index}" if qty > 1 else ""
             options.append(
                 discord.SelectOption(
-                    label=f"{index}. {name} x{qty}"[:100],
+                    label=f"{expanded_index}. {name}{suffix}"[:100],
                     description=dungeon.format_item_description(name)[:100],
-                    value=str(index),
+                    value=f"{index}:{copy_index}",
                 )
             )
+            expanded_index += 1
     return options[:25]
 
 
@@ -1013,28 +1164,37 @@ def sell_select_options(state):
     options = []
     inventory = dungeon.inventory_lines(state)
     for index, (name, qty) in enumerate(inventory, 1):
+        price = int(dungeon.ITEMS.get(name, {"price": 0})["price"] * 0.5)
         options.append(
             discord.SelectOption(
-                label=f"{index}. {name} x{qty}"[:100],
+                label=f"{index}. {name} x{qty}（賣{price}G/個）"[:100],
                 description=dungeon.format_item_description(name)[:100],
                 value=str(index),
             )
         )
     start = len(inventory) + 1
     for index, item in enumerate(state.get("equipment_bag", []), start):
-        options.append(discord.SelectOption(label=f"{index}. {dungeon.format_equipment(item)}"[:100], value=str(index)))
+        price = int(item.get("price", dungeon.estimated_equipment_price(item)) * 0.5)
+        options.append(
+            discord.SelectOption(
+                label=f"{index}. {item['name']}（賣{price}G）"[:100],
+                description=dungeon.format_equipment(item)[:100],
+                value=str(index),
+            )
+        )
     return options[:25]
 
 
 def equipment_select_options(state):
     options = []
     start = len(dungeon.inventory_lines(state)) + 1
-    for index, item in enumerate(state.get("equipment_bag", []), start):
+    for bag_index, item in enumerate(state.get("equipment_bag", [])):
+        display_index = start + bag_index
         options.append(
             discord.SelectOption(
-                label=f"{index}. {item['name']}"[:100],
+                label=f"{display_index}. {item['name']}"[:100],
                 description=dungeon.format_equipment(item)[:100],
-                value=str(index),
+                value=f"eq:{bag_index}",
             )
         )
     return options[:25]
@@ -1122,6 +1282,53 @@ async def dungeon_status(interaction: discord.Interaction):
     await send_interaction_text(interaction, dungeon.status_text(state), view=create_dungeon_view(state))
 
 
+@bot.tree.command(name="旁白", description="開啟或關閉 AI GM 旁白")
+@app_commands.describe(enabled="是否開啟 AI 旁白")
+@app_commands.rename(enabled="開啟")
+async def dungeon_narration_toggle(interaction: discord.Interaction, enabled: bool):
+    if await reject_wrong_interaction(interaction):
+        return
+    await defer_interaction(interaction)
+    state, message = load_dungeon_or_message(interaction)
+    if message:
+        await send_interaction_text(interaction, message)
+        return
+    state["gm_narration_enabled"] = bool(enabled)
+    save_player(state)
+    status = "開啟" if enabled else "關閉"
+    await send_interaction_text(
+        interaction,
+        f"AI GM 旁白已{status}。\n模型：`{DUNGEON_GM_MODEL}`\n如果 Ollama 沒回應，遊戲會自動使用原本文字。",
+        view=create_dungeon_view(state),
+    )
+
+
+@bot.tree.command(name="問", description="詢問 AI GM 目前地城狀況")
+@app_commands.describe(question="想問 GM 的地城問題")
+@app_commands.rename(question="問題")
+async def dungeon_ask_gm(interaction: discord.Interaction, question: str):
+    if await reject_wrong_interaction(interaction):
+        return
+    await defer_interaction(interaction)
+    state, message = load_dungeon_or_message(interaction)
+    if message:
+        await send_interaction_text(interaction, message)
+        return
+    answer = await asyncio.to_thread(
+        dungeon_ai.answer_gm_question,
+        build_gm_chat_context(state),
+        question,
+        DUNGEON_GM_MODEL,
+    )
+    if not answer:
+        answer = "GM暫時沉默了。請確認 Ollama 是否啟動，或稍後再問。"
+    await send_interaction_text(
+        interaction,
+        f"**問題：**{question}\n\n**アロナ:**\n{answer}",
+        view=create_dungeon_view(state),
+    )
+
+
 @bot.tree.command(name="探索", description="查看目前可選擇的探索事件")
 async def dungeon_explore(interaction: discord.Interaction):
     if await reject_wrong_interaction(interaction):
@@ -1147,7 +1354,13 @@ async def dungeon_choose(interaction: discord.Interaction, number: app_commands.
         await send_interaction_text(interaction, message)
         return
     set_dungeon_actor(state, interaction)
-    await send_dungeon_result(interaction, state, dungeon.choose_event(state, int(number)))
+    await send_dungeon_result(
+        interaction,
+        state,
+        dungeon.choose_event(state, int(number)),
+        narrate=True,
+        narration_kind="探索選擇",
+    )
 
 
 @bot.tree.command(name="攻擊", description="在戰鬥中攻擊敵人")
@@ -1160,7 +1373,7 @@ async def dungeon_attack(interaction: discord.Interaction):
         await send_interaction_text(interaction, message)
         return
     set_dungeon_actor(state, interaction)
-    await send_dungeon_result(interaction, state, dungeon.attack(state))
+    await send_dungeon_result(interaction, state, dungeon.attack(state), narrate=True, narration_kind="戰鬥行動")
 
 
 @bot.tree.command(name="逃跑", description="在戰鬥中嘗試逃跑")
@@ -1173,7 +1386,7 @@ async def dungeon_run(interaction: discord.Interaction):
         await send_interaction_text(interaction, message)
         return
     set_dungeon_actor(state, interaction)
-    await send_dungeon_result(interaction, state, dungeon.run_away(state))
+    await send_dungeon_result(interaction, state, dungeon.run_away(state), narrate=True, narration_kind="逃跑行動")
 
 
 @bot.tree.command(name="背包", description="查看背包、道具與備用裝備")
@@ -1201,7 +1414,14 @@ async def dungeon_use(interaction: discord.Interaction, number: app_commands.Ran
         await send_interaction_text(interaction, message)
         return
     set_dungeon_actor(state, interaction)
-    await send_dungeon_result(interaction, state, dungeon.use_item(state, int(number)))
+    mode_before = state.get("mode")
+    await send_dungeon_result(
+        interaction,
+        state,
+        dungeon.use_item(state, int(number)),
+        narrate=mode_before in {"battle", "encounter"},
+        narration_kind="戰鬥道具",
+    )
 
 
 @bot.tree.command(name="裝備", description="裝備背包中的備用武器、防具或飾品")

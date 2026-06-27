@@ -16,6 +16,7 @@ rag_index/
 *.zip
 *.tmp
 *.log
+logs/
 
 # OS/editor noise
 .DS_Store
