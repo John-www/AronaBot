@@ -32,7 +32,7 @@ DAILY_WEATHER_LOCATIONS = ["台北", "新竹", "桃園"]
 OLLAMA_HEALTH_URL = "http://localhost:11434/api/tags"
 LEGACY_SETTING_PATH = Path(os.getenv("LEGACY_BOT_SETTING", r"D:\PUclass\VStest\2B_ISNOTBOT-main\setting.json"))
 NO_COLOR_IMAGE_PATH = Path(os.getenv("NO_COLOR_IMAGE_PATH", PROJECT_DIR / "newbotpic" / "NOH.png"))
-LOTTERY_IMAGE_DIR = Path(os.getenv("LOTTERY_IMAGE_DIR", PROJECT_DIR / "newbotpic" / "LUCKY"))
+LOTTERY_IMAGE_DIR = Path(os.getenv("LOTTERY_IMAGE_DIR", PROJECT_DIR / "newbotpic" / "LUCKY" / "YES"))
 IMAGE_SUFFIXES = {".gif", ".jfif", ".jpeg", ".jpg", ".png", ".webp"}
 CWA_WEEK_URL = "https://www.cwa.gov.tw/V8/C/W/County/MOD/wf7dayNC_NCSEI/ALL_Week.html"
 CWA_WEEK_TIME_URL = "https://www.cwa.gov.tw/Data/js/fcst/week_TIME.js"
@@ -776,7 +776,7 @@ async def draw_lottery(ctx):
         return
     image_path = random_image_from_dir(LOTTERY_IMAGE_DIR) or random_existing_file(LEGACY_SETTINGS.get("pic2", []))
     if not image_path:
-        await ctx.reply("找不到可用的抽籤圖片，請確認 `newbotpic/LUCKY` 裡有圖片。")
+        await ctx.reply("找不到可用的抽籤圖片，請確認 `newbotpic/LUCKY/YES` 裡有圖片。")
         return
     await ctx.reply(file=discord.File(str(image_path)))
 
